@@ -6,11 +6,11 @@ from PyQt6.QtWidgets import (QMainWindow, QTextEdit, QVBoxLayout, QSizePolicy,
                              QWidget, QPushButton, QFileDialog, QLabel,
                              QListWidget, QHBoxLayout, QSplitter, QFrame,
                              QApplication, QMenu, QMessageBox,
-                             QTableWidget, QTableWidgetItem, QHeaderView, # Ensure these are here
-                             QTreeView, QInputDialog
+                             QTableWidget, QTableWidgetItem, # Ensure these are here
+                             QTreeView, QInputDialog, QStackedWidget, QTextBrowser, QFormLayout
                              )
 from PyQt6.QtCore import Qt, QPoint, QTimer, QModelIndex
-from PyQt6.QtGui import QAction, QStandardItemModel, QStandardItem, QFont, QColor
+from PyQt6.QtGui import QAction, QStandardItemModel, QStandardItem, QFont, QColor, QTextCharFormat
 
 from .commit_graph_widget import CommitGraphWidget, ScrollableCommitGraphWidget
 
@@ -33,117 +33,121 @@ DIFF_DEFAULT_COLOR = QColor("black")
 class SimpleGitApp(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Simple Python Git GUI - Step 11 Fix: Visual Graph") # Title Updated
+        self.setWindowTitle("Simple Python Git GUI - Step 1: Commit Details") # Updated title
         self.setGeometry(50, 50, 1250, 800)
+        self.repo_path = None; self.current_git_thread = None; self.current_operation_name = None; self._output_parser_slot = None; self._is_initial_load_status = False; self._is_initial_load_history = False; self._is_initial_load_branches = False; self.current_branch = None
+        self.graph_widget_container: Optional[ScrollableCommitGraphWidget | QLabel] = None; self.graph_widget: Optional[CommitGraphWidget] = None
+        self._selected_commit_hash_details: Optional[str] = None # Track hash being detailed
 
-        self.repo_path = None
-        self.current_git_thread = None
-        self.current_operation_name = None
-        self._output_parser_slot = None
-        self._is_initial_load_status = False
-        self._is_initial_load_history = False
-        self._is_initial_load_branches = False
-        self.current_branch = None
-
-        # Type hint for the graph widget instance (can be None if import fails)
-        # These attributes replace self.history_table
-        self.graph_widget_container: Optional[ScrollableCommitGraphWidget | QLabel] = None # Container (ScrollArea or Error Label)
-        self.graph_widget: Optional[CommitGraphWidget] = None # The actual drawing widget inside
-
-        self._init_ui() # This now creates graph_widget_container and graph_widget
+        self._init_ui() # Calls the updated UI setup below
         self._connect_signals()
         self.update_button_states()
+        self._show_commit_detail_view(False) # Start with normal commit box visible
 
     def _init_ui(self):
         """Initialize UI elements."""
-        self.central_widget = QWidget()
-        self.main_layout = QVBoxLayout(self.central_widget)
+        self.central_widget = QWidget(); self.main_layout = QVBoxLayout(self.central_widget)
 
-        # --- Top Bar --- (Unchanged from previous step with Pull/Push)
+        # --- Top Bar ---
         self.top_bar_layout = QHBoxLayout(); self.open_button = QPushButton("Open Repository"); self.repo_label = QLabel("No repository opened."); self.repo_label.setWordWrap(True); self.fetch_button = QPushButton("Fetch"); self.fetch_button.setEnabled(False); self.pull_button = QPushButton("Pull"); self.pull_button.setEnabled(False); self.push_button = QPushButton("Push"); self.push_button.setEnabled(False); self.new_branch_button = QPushButton("New Branch..."); self.new_branch_button.setEnabled(False); self.refresh_branches_button = QPushButton("Refresh Branches"); self.refresh_branches_button.setEnabled(False); self.status_button = QPushButton("Refresh Status"); self.status_button.setEnabled(False); self.refresh_history_button = QPushButton("Refresh History"); self.refresh_history_button.setEnabled(False); self.top_bar_layout.addWidget(self.open_button); self.top_bar_layout.addWidget(self.repo_label, 1); self.top_bar_layout.addWidget(self.fetch_button); self.top_bar_layout.addWidget(self.pull_button); self.top_bar_layout.addWidget(self.push_button); self.top_bar_layout.addStretch(1); self.top_bar_layout.addWidget(self.new_branch_button); self.top_bar_layout.addStretch(1); self.top_bar_layout.addWidget(self.refresh_branches_button); self.top_bar_layout.addWidget(self.status_button); self.top_bar_layout.addWidget(self.refresh_history_button); self.main_layout.addLayout(self.top_bar_layout)
 
-
-        # --- Top Level Splitter (Branches | Rest) --- (Unchanged)
+        # --- Top Level Splitter (Branches | Rest) ---
         self.top_splitter = QSplitter(Qt.Orientation.Horizontal)
-        # --- Branches Panel (Left Side) --- (Unchanged)
+        # --- Branches Panel (Left Side) ---
         self.branches_frame = QFrame(); self.branches_layout = QVBoxLayout(self.branches_frame); self.branches_layout.setContentsMargins(5, 5, 5, 5); self.branches_label = QLabel("Branches / Remotes"); self.branches_view = QTreeView(); self.branches_view.setHeaderHidden(True); self.branches_view.setEditTriggers(QTreeView.EditTrigger.NoEditTriggers); self.branches_model = QStandardItemModel(); self.branches_view.setModel(self.branches_model); self.branches_layout.addWidget(self.branches_label); self.branches_layout.addWidget(self.branches_view)
 
-        # --- Main Area Container (Right Side - Holds Status+Diff | History+Commit) --- (Unchanged)
+        # --- Main Area Container (Right Side) ---
         self.main_area_container = QWidget(); self.main_area_layout = QVBoxLayout(self.main_area_container); self.main_area_layout.setContentsMargins(0, 0, 0, 0)
 
-        # --- Main Horizontal Splitter (Status+Diff | History Graph+Commit) --- (Unchanged)
+        # --- Main Horizontal Splitter (Status+Diff | History Graph+Commit/Details) ---
         self.main_splitter = QSplitter(Qt.Orientation.Horizontal)
 
-        # --- Left side of Main Splitter: Status Lists + Diff View --- (Unchanged)
+        # --- Left side: Status+Diff ---
         self.status_diff_widget = QWidget(); self.status_diff_layout = QVBoxLayout(self.status_diff_widget); self.status_diff_layout.setContentsMargins(0,0,0,0); self.status_diff_splitter = QSplitter(Qt.Orientation.Vertical); self.status_frame = QFrame(); self.status_layout = QVBoxLayout(self.status_frame); self.status_layout.setContentsMargins(5, 5, 5, 5); self.staged_area_layout=QHBoxLayout();self.staged_label=QLabel("Staged Files:");self.unstage_button=QPushButton("Unstage Selected");self.unstage_button.setEnabled(False);self.staged_area_layout.addWidget(self.staged_label);self.staged_area_layout.addStretch();self.staged_area_layout.addWidget(self.unstage_button);self.staged_list=QListWidget();self.staged_list.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection); self.unstaged_area_layout=QHBoxLayout();self.unstaged_label=QLabel("Unstaged Changes:");self.stage_button=QPushButton("Stage Selected");self.stage_button.setEnabled(False);self.unstaged_area_layout.addWidget(self.unstaged_label);self.unstaged_area_layout.addStretch();self.unstaged_area_layout.addWidget(self.stage_button);self.unstaged_list=QListWidget();self.unstaged_list.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection);self.unstaged_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu); self.untracked_label=QLabel("Untracked Files:");self.untracked_list=QListWidget();self.untracked_list.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection);self.untracked_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu); self.status_layout.addLayout(self.staged_area_layout);self.status_layout.addWidget(self.staged_list,1);self.status_layout.addLayout(self.unstaged_area_layout);self.status_layout.addWidget(self.unstaged_list,1);self.status_layout.addWidget(self.untracked_label);self.status_layout.addWidget(self.untracked_list,1);self.status_frame.setLayout(self.status_layout); self.diff_frame = QFrame(); self.diff_layout = QVBoxLayout(self.diff_frame); self.diff_layout.setContentsMargins(5, 5, 5, 5); self.diff_label = QLabel("Diff for selected file:"); self.diff_view = QTextEdit(); self.diff_view.setReadOnly(True); self.diff_view.setFontFamily("monospace"); self.diff_view.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap); self.diff_layout.addWidget(self.diff_label); self.diff_layout.addWidget(self.diff_view); self.status_diff_splitter.addWidget(self.status_frame); self.status_diff_splitter.addWidget(self.diff_frame); self.status_diff_splitter.setSizes([400, 250]); self.status_diff_layout.addWidget(self.status_diff_splitter)
 
-        # --- Right side of Main Splitter: History Graph + Commit Area --- <<< MODIFIED AREA
+        # --- Right side: History Graph + Commit Area / Details ---
         self.right_pane_widget=QWidget()
         self.right_pane_layout=QVBoxLayout(self.right_pane_widget)
         self.right_pane_layout.setContentsMargins(0,0,0,0)
         self.right_splitter=QSplitter(Qt.Orientation.Vertical)
 
-        # -- History Graph (Top of Right Splitter) -- <<< REPLACED Table with Graph
-        # if ScrollableCommitGraphWidget:
-        self.graph_widget_container = ScrollableCommitGraphWidget() # Use the scrollable wrapper
-        self.graph_widget = self.graph_widget_container.graph_widget # Keep ref to inner widget
-        # else: # Fallback if import failed
-        #     self.graph_widget_container = QLabel("Error: CommitGraphWidget failed to load.")
-        #     self.graph_widget = None # Ensure graph_widget is None
-        #     print("ERROR: ScrollableCommitGraphWidget could not be imported or initialized.")
-        # Set properties on the container (ScrollArea)
-        if self.graph_widget_container:
-            self.graph_widget_container.setMinimumHeight(200)
-            self.graph_widget_container.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        # -- History Graph (Top of Right Splitter) --
+        if ScrollableCommitGraphWidget: self.graph_widget_container = ScrollableCommitGraphWidget(); self.graph_widget = self.graph_widget_container.graph_widget
+        else: self.graph_widget_container = QLabel("Error: CommitGraphWidget failed to load."); self.graph_widget = None
+        if self.graph_widget_container: self.graph_widget_container.setMinimumHeight(200); self.graph_widget_container.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
+        # -- Bottom Area: Stacked Widget for Commit Box / Commit Details --
+        self.bottom_right_stack = QStackedWidget()
 
-        # -- Commit Area Frame (Bottom of Right Splitter) --
-        # (Commit area setup unchanged)
-        self.commit_area_frame=QFrame()
-        self.commit_layout=QVBoxLayout(self.commit_area_frame)
-        self.commit_layout.setContentsMargins(5,5,5,5)
-        self.commit_label=QLabel("Commit Message:")
-        self.commit_message_box=QTextEdit()
-        self.commit_message_box.setPlaceholderText("Enter commit message here...")
-        self.commit_message_box.setSizePolicy(QSizePolicy.Policy.Expanding,QSizePolicy.Policy.Expanding)
-        self.commit_button=QPushButton("Commit Staged Changes")
-        self.commit_button.setEnabled(False)
-        self.commit_layout.addWidget(self.commit_label)
-        self.commit_layout.addWidget(self.commit_message_box,1)
-        self.commit_layout.addWidget(self.commit_button)
-        self.commit_area_frame.setMinimumHeight(100)
-        self.commit_area_frame.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.MinimumExpanding)
+        # -- Page 0: Standard Commit Area --
+        self.commit_area_frame=QFrame(); self.commit_layout=QVBoxLayout(self.commit_area_frame); self.commit_layout.setContentsMargins(5,5,5,5); self.commit_label=QLabel("Commit Message:"); self.commit_message_box=QTextEdit(); self.commit_message_box.setPlaceholderText("Enter commit message here..."); self.commit_message_box.setSizePolicy(QSizePolicy.Policy.Expanding,QSizePolicy.Policy.Expanding); self.commit_button=QPushButton("Commit Staged Changes"); self.commit_button.setEnabled(False); self.commit_layout.addWidget(self.commit_label); self.commit_layout.addWidget(self.commit_message_box,1); self.commit_layout.addWidget(self.commit_button); self.commit_area_frame.setMinimumHeight(100); self.commit_area_frame.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.MinimumExpanding)
+        self.bottom_right_stack.addWidget(self.commit_area_frame)
 
+        # -- Page 1: Commit Details Area --
+        self.commit_detail_widget = QWidget()
+        self.commit_detail_layout = QVBoxLayout(self.commit_detail_widget)
+        self.commit_detail_layout.setContentsMargins(5, 5, 5, 5)
+        # Metadata Form
+        self.detail_form_layout = QFormLayout()
+        self.detail_hash_label = QLabel("Commit:")
+        self.detail_hash_value = QLabel() # Use QLabel for read-only hash
+        self.detail_hash_value.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.detail_author_label = QLabel("Author:")
+        self.detail_author_value = QLabel()
+        self.detail_author_value.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.detail_date_label = QLabel("Date:")
+        self.detail_date_value = QLabel()
+        self.detail_date_value.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.detail_form_layout.addRow(self.detail_hash_label, self.detail_hash_value)
+        self.detail_form_layout.addRow(self.detail_author_label, self.detail_author_value)
+        self.detail_form_layout.addRow(self.detail_date_label, self.detail_date_value)
 
-        # Add History Graph Container and Commit Area to the right splitter
-        if self.graph_widget_container: # Add only if it exists
-            self.right_splitter.addWidget(self.graph_widget_container)
-        self.right_splitter.addWidget(self.commit_area_frame)
-        self.right_splitter.setSizes([450, 150]) # Adjust initial sizes
+        # Commit Message View
+        self.detail_message_label = QLabel("Message:")
+        self.detail_message_view = QTextBrowser() # Good for read-only, links etc.
+        self.detail_message_view.setOpenExternalLinks(True)
+        self.detail_message_view.setMinimumHeight(60)
+        self.detail_message_view.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.MinimumExpanding)
 
+        # Changed Files List
+        self.detail_files_label = QLabel("Changed Files:")
+        self.detail_files_list = QListWidget()
+        self.detail_files_list.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
+        self.detail_files_list.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+
+        # Adding to UI
+        self.commit_detail_layout.addLayout(self.detail_form_layout)
+        self.commit_detail_layout.addWidget(self.detail_message_label)
+        self.commit_detail_layout.addWidget(self.detail_message_view)
+        self.commit_detail_layout.addWidget(self.detail_files_label)
+        self.commit_detail_layout.addWidget(self.detail_files_list, 1) # Give list stretch factor
+
+        self.bottom_right_stack.addWidget(self.commit_detail_widget)
+
+        # Add History Graph Container and Bottom Stack to the right splitter
+        if self.graph_widget_container: self.right_splitter.addWidget(self.graph_widget_container)
+        self.right_splitter.addWidget(self.bottom_right_stack) # <<< Add Stack instead of commit_area_frame
+        self.right_splitter.setSizes([450, 150])
 
         self.right_pane_layout.addWidget(self.right_splitter)
 
-
-        # --- Assemble Splitters --- (Unchanged)
-        # Add Left (Status+Diff) and Right (History+Commit) to the main_splitter
+        # --- Assemble Splitters ---
         self.main_splitter.addWidget(self.status_diff_widget)
         self.main_splitter.addWidget(self.right_pane_widget)
         self.main_splitter.setSizes([550, 550])
         self.main_area_layout.addWidget(self.main_splitter)
-        # Add Branches Panel and Main Area Container to Top Splitter
         self.top_splitter.addWidget(self.branches_frame)
         self.top_splitter.addWidget(self.main_area_container)
         self.top_splitter.setSizes([200, 1050])
         self.main_layout.addWidget(self.top_splitter, 1)
 
-        # --- Error/Output Area --- (Unchanged)
+        # --- Error/Output Area ---
         self.error_output_area = QTextEdit(); self.error_output_area.setReadOnly(True); self.error_output_area.setMaximumHeight(60); self.main_layout.addWidget(self.error_output_area)
         self.setCentralWidget(self.central_widget)
 
     def _connect_signals(self):
         """Connect signals to slots."""
-        # Basic actions
+        # --- Top Bar Actions ---
         self.open_button.clicked.connect(self.open_repository)
         self.status_button.clicked.connect(self.refresh_status)
         self.refresh_history_button.clicked.connect(self.refresh_history)
@@ -153,38 +157,252 @@ class SimpleGitApp(QMainWindow):
         self.pull_button.clicked.connect(self.pull_current_branch)
         self.push_button.clicked.connect(self.push_current_branch)
 
-        # Button state updates based on list selections
+        # --- State Update Triggers ---
+        # Update button enable state when list selections change
         self.staged_list.itemSelectionChanged.connect(self.update_button_states)
         self.unstaged_list.itemSelectionChanged.connect(self.update_button_states)
-        self.untracked_list.itemSelectionChanged.connect(self.update_button_states) # <<< ADDED Untracked list selection
-
-        # Button state updates based on list content changes (more reliable for commit enable state)
+        self.untracked_list.itemSelectionChanged.connect(self.update_button_states)
+        # Update commit button enable state when staged list content changes
         self.staged_list.model().rowsInserted.connect(self.update_button_states)
         self.staged_list.model().rowsRemoved.connect(self.update_button_states)
-
-        # Button state updates based on commit message content
+        # Update commit button enable state when commit message changes
         self.commit_message_box.textChanged.connect(self.update_button_states)
 
-        # Action buttons
-        self.stage_button.clicked.connect(self.stage_selected_files) # This button now handles both lists
+        # --- Staging Area Action Buttons ---
+        self.stage_button.clicked.connect(self.stage_selected_files)
         self.unstage_button.clicked.connect(self.unstage_selected_files)
         self.commit_button.clicked.connect(self.commit_changes)
 
-        # Context Menus
+        # --- Context Menus (Status Lists) ---
         self.unstaged_list.customContextMenuRequested.connect(self.show_status_context_menu)
         self.untracked_list.customContextMenuRequested.connect(self.show_status_context_menu)
 
-        # Branch View Actions
-        self.branches_view.doubleClicked.connect(self.on_branch_double_clicked)
+        # --- Branch View Actions ---
+        self.branches_view.doubleClicked.connect(self.on_branch_double_clicked) # For checkout
 
-        # Status List Selection for Diff View
-        # Only show diff for Staged/Unstaged, not Untracked (as 'git diff' doesn't apply directly)
+        # --- Commit History / Details Connections ---
+        # Connect graph widget's selection signal to show details
+        if self.graph_widget: # Check if graph widget was initialized
+            self.graph_widget.commit_selected.connect(self.show_commit_details)
+        else:
+            print("Warning: Graph widget not available for signal connection.")
+        # Connect selection in commit detail's changed files list to show diff for that file
+        self.detail_files_list.currentItemChanged.connect(self.show_commit_file_diff)
+        # Clear diff view when selection is lost in detail files list
+        self.detail_files_list.itemSelectionChanged.connect(
+            lambda: self.clear_diff_view() if not self.detail_files_list.currentItem() else None
+        )
+
+
+        # --- Diff View Connections (Working Tree / Index) ---
+        # Show diff when item selection changes in status lists
         self.staged_list.currentItemChanged.connect(self.show_diff)
         self.unstaged_list.currentItemChanged.connect(self.show_diff)
-        self.staged_list.itemSelectionChanged.connect(lambda: self.show_diff() if not self.staged_list.selectedItems() else None)
-        self.unstaged_list.itemSelectionChanged.connect(lambda: self.show_diff() if not self.unstaged_list.selectedItems() else None)
-        # Clear diff if untracked is selected
-        self.untracked_list.itemSelectionChanged.connect(lambda: self.clear_diff_view() if self.untracked_list.selectedItems() else None)
+        # Clear diff view when selection is lost in status lists
+        self.staged_list.itemSelectionChanged.connect(
+            lambda: self.clear_diff_view() if not self.staged_list.currentItem() else None
+        )
+        self.unstaged_list.itemSelectionChanged.connect(
+            lambda: self.clear_diff_view() if not self.unstaged_list.currentItem() else None
+        )
+        # Clear diff view if an untracked file is selected
+        self.untracked_list.itemSelectionChanged.connect(
+            lambda: self.clear_diff_view() if self.untracked_list.selectedItems() else None
+        )
+
+    def _show_commit_detail_view(self, show_details: bool):
+        """Switches the bottom right pane between commit box and detail view."""
+        if not self.bottom_right_stack: # Safety check
+             print("Error: Bottom right stack widget not initialized.")
+             return
+
+        if show_details:
+            self.bottom_right_stack.setCurrentWidget(self.commit_detail_widget)
+        else:
+            # Clear details when switching away
+            if self._selected_commit_hash_details: # Only clear if details were shown
+                 self.detail_hash_value.clear()
+                 self.detail_author_value.clear()
+                 self.detail_date_value.clear()
+                 self.detail_message_view.clear()
+                 self.detail_files_list.clear()
+                 self.clear_diff_view() # Clear diff associated with commit details
+                 self._selected_commit_hash_details = None # Clear the stored hash
+            # Deselect graph node visually?
+            if self.graph_widget and self.graph_widget._selected_commit_hash:
+                 self.graph_widget._selected_commit_hash = None
+                 self.graph_widget.update()
+
+            self.bottom_right_stack.setCurrentWidget(self.commit_area_frame)
+            self.update_button_states() # Ensure commit button state is correct
+
+    def show_commit_details(self, commit_hash: str):
+        """Fetches and displays details for the selected commit hash."""
+        if not commit_hash or not self.repo_path:
+            self._show_commit_detail_view(False) # Revert to commit box if invalid hash/repo
+            return
+
+        # Prevent re-fetching if the same commit is already selected and detailed
+        if commit_hash == self._selected_commit_hash_details:
+             print(f"Commit {commit_hash[:7]} details already shown.")
+             self._show_commit_detail_view(True) # Ensure detail view is visible
+             return
+
+        # Check if busy *before* proceeding
+        if not self._can_run_git_command(f"show commit {commit_hash[:7]}"):
+            # Don't switch view if busy, maybe provide feedback?
+            self.error_output_area.setText(f"Cannot show details: {self.current_operation_name} is running.")
+            # Deselect node visually? (Requires graph widget modification)
+            # if self.graph_widget: self.graph_widget.select_commit(None)
+            return
+
+        print(f"Fetching details for commit: {commit_hash}")
+        self._selected_commit_hash_details = commit_hash # Store hash being detailed *before* starting command
+        self._show_commit_detail_view(True) # Switch to detail view
+
+        # Clear previous details immediately and show placeholder
+        self.detail_hash_value.setText(f"{commit_hash[:12]}...")
+        self.detail_author_value.clear()
+        self.detail_date_value.clear()
+        self.detail_message_view.setText("Loading details...")
+        self.detail_files_list.clear()
+        self.clear_diff_view() # Clear diff associated with previous selection
+
+        self.error_output_area.setText(f"Loading details for {commit_hash[:7]}...")
+        self.set_ui_busy(True) # Set busy while fetching details
+
+        # Command to get metadata and file status changes
+        # Use null separators for metadata, then rely on --stat format after null
+        git_show_format = "%H%x00%an%x00%ae%x00%aD%x00%cn%x00%ce%x00%cD%x00%B%x00" # Note trailing null
+        command = ['git', 'show', f'--pretty=format:{git_show_format}', '--stat=4096', '--no-patch', commit_hash] # Get stat, no diff yet
+
+        # Use the new parser slot for commit details
+        self._start_git_thread(command, "Show Commit", parser_slot=self._parse_and_display_commit_details)
+
+    def _parse_and_display_commit_details(self, show_output: str):
+        """Parses the output of 'git show --pretty=format --stat' and updates the detail view."""
+        print("Parsing commit details...")
+        # Clear previous details first
+        self.detail_hash_value.clear()
+        self.detail_author_value.clear()
+        self.detail_date_value.clear()
+        self.detail_message_view.clear()
+        self.detail_files_list.clear()
+
+        try:
+            # --- Parse Metadata (separated by null bytes) ---
+            metadata_part, stat_part = show_output.split('\x00\n', 1) # Split metadata from stat part
+            metadata = metadata_part.split('\x00')
+            if len(metadata) < 8:
+                print(f"Warning: Could not parse commit metadata fully. Parts: {len(metadata)}")
+                self.detail_message_view.setText("Error parsing commit metadata.")
+                return
+
+            commit_hash = metadata[0]
+            author_name = metadata[1]
+            author_email = metadata[2]
+            author_date = metadata[3]
+            # committer_name = metadata[4] # Not displayed currently
+            # committer_email = metadata[5] # Not displayed currently
+            # commit_date = metadata[6] # Not displayed currently
+            commit_body = metadata[7] # The rest is the body
+
+            # --- Populate Metadata UI ---
+            self.detail_hash_value.setText(commit_hash)
+            # Maybe format author/date nicely
+            self.detail_author_value.setText(f"{author_name} <{author_email}>")
+            self.detail_date_value.setText(author_date) # Use the formatted date from git
+            self.detail_message_view.setText(commit_body.strip()) # Display full message
+
+            # --- Parse File Statistics (`--stat` output) ---
+            # Example stat line: " path/to/file.txt | 10 +++++-----"
+            # Example rename: " path/{old => new}.txt | Bin 0 -> 1024 bytes" (Handle binary later)
+            file_changes = []
+            # Split stat part carefully, handling potential empty lines
+            stat_lines = [line.strip() for line in stat_part.strip().split('\n') if line.strip()]
+
+            # The last line of --stat is often a summary line, ignore it for file list
+            summary_line_index = -1
+            for i, line in reversed(list(enumerate(stat_lines))):
+                if "file changed" in line or "files changed" in line:
+                     summary_line_index = i
+                     break
+
+            if summary_line_index != -1:
+                 stat_lines = stat_lines[:summary_line_index] # Exclude summary line
+
+            for line in stat_lines:
+                parts = line.split('|', 1)
+                if len(parts) == 2:
+                    file_path = parts[0].strip()
+                    # Basic handling for rename syntax like " dir/{a.txt => b.txt}"
+                    if '{' in file_path and '=>' in file_path and '}' in file_path:
+                         # Extract the 'new' path part for simplicity
+                         prefix = file_path[:file_path.find('{')]
+                         suffix_part = file_path[file_path.find('=>')+2:file_path.find('}')]
+                         file_path = prefix + suffix_part
+
+                    # Could add change summary (+/-) as tooltip later
+                    # change_summary = parts[1].strip()
+                    file_changes.append(file_path)
+
+            # --- Populate File List ---
+            if file_changes:
+                self.detail_files_list.addItems(sorted(file_changes))
+            else:
+                self.detail_files_list.addItem("No file changes in this commit.") # Or leave empty
+
+            print("Commit details parsed successfully.")
+
+        except Exception as e:
+            print(f"Error parsing 'git show' output: {e}\nOutput was:\n{show_output[:500]}...") # Log error and partial output
+            self.detail_message_view.setText(f"Error displaying commit details.\n{e}")
+            # Reset stored hash if parsing failed badly?
+            # self._selected_commit_hash_details = None
+
+    def show_commit_file_diff(self):
+        """Shows the diff for a file selected in the commit details file list."""
+        current_item = self.detail_files_list.currentItem()
+        # Use the hash stored when the commit detail view was populated
+        commit_hash = self._selected_commit_hash_details
+
+        if not current_item or not commit_hash or not self.repo_path:
+            # Don't clear diff here, maybe user wants to see previous diff
+            # self.clear_diff_view()
+            return
+
+        # Assume item text is the file path (already processed potential renames)
+        file_path = current_item.text().strip()
+        if not file_path:
+            self.clear_diff_view()
+            return
+
+        # Don't run if busy
+        if not self._can_run_git_command(f"show diff for {file_path} in {commit_hash[:7]}"):
+            return
+
+        self.diff_view.setText(f"Loading diff for {file_path} in commit {commit_hash[:7]}...")
+        self.diff_label.setText(f"Changes to {file_path} in {commit_hash[:7]}:")
+
+        # Command to show diff for a specific file within a commit vs its first parent
+        # Use hash^! syntax for merges? No, diff vs first parent is more typical for browsing.
+        # Use `git diff <parent> <commit> -- <file>` for robustness against octopus merges?
+        # Simpler: diff commit vs its immediate predecessor `hash^..hash`
+        # Note: This will fail for the initial commit (no parents). Handle this?
+        # Check if commit has parents? `git rev-list --parents -n 1 <hash>`
+        # Alternative: `git show <hash> -- <file>` (includes diff in output, needs parsing)
+
+        # Let's use `git diff <hash>^ <hash> -- <file>` (diff against first parent)
+        # This needs error handling if it's the root commit.
+        # Simpler robust option: `git diff-tree --no-commit-id --patch -r <hash>^ <hash> -- <file>`
+        # Safest might be `git show <hash> -- <file>` and parse the diff section.
+
+        # Using `git diff <hash>^.. <hash>` for now, assuming non-root commit primarily
+        # We will rely on git failing gracefully for the root commit for now.
+        command = ['git', 'diff', f"{commit_hash}^..{commit_hash}", '--', file_path]
+
+        # Point parser to the existing diff display function
+        self._start_git_thread(command, "Commit Diff", parser_slot=self._display_diff)
 
     # --- Context Menu Slot ---
     def show_status_context_menu(self, point: QPoint):
@@ -431,41 +649,54 @@ class SimpleGitApp(QMainWindow):
             )
 
     def show_diff(self):
-        # (Unchanged)
-        staged_current = self.staged_list.currentItem()
-        unstaged_current = self.unstaged_list.currentItem()
+        """Shows git diff for the currently selected file in STAGED or UNSTAGED lists."""
+        source_list = None
         selected_item = None
         is_staged = False
-        if unstaged_current and unstaged_current.isSelected():
-            selected_item = unstaged_current
+        is_working_tree_diff = False # Flag to distinguish from commit diff
+
+        # Prioritize selection in status lists
+        if self.unstaged_list.currentItem() and self.unstaged_list.currentItem().isSelected():
+            source_list = self.unstaged_list
+            selected_item = source_list.currentItem()
             is_staged = False
-        elif staged_current and staged_current.isSelected():
-            selected_item = staged_current
+            is_working_tree_diff = True
+        elif self.staged_list.currentItem() and self.staged_list.currentItem().isSelected():
+            source_list = self.staged_list
+            selected_item = source_list.currentItem()
             is_staged = True
-        else:
-            self.clear_diff_view()
-            return
-        if not selected_item or not self.repo_path:
-            self.clear_diff_view()
-            return
-        file_path = extract_file_path(selected_item.text())
-        if not file_path:
-            self.clear_diff_view()
-            return
-        if self.current_git_thread and self.current_git_thread.isRunning():
-            self.error_output_area.setText(
-                f"Cannot show diff: {self.current_operation_name} is running."
-            )
-            return
-        self.diff_view.setText(f"Loading diff for {file_path}...")
-        self.diff_label.setText(
-            f"Diff for {file_path} ({'Staged' if is_staged else 'Unstaged'}):"
-        )
-        command = ["git", "diff"]
-        if is_staged:
-            command.append("--cached")
-        command.extend(["--", file_path])
-        self._start_git_thread(command, "Diff", parser_slot=self._display_diff)
+            is_working_tree_diff = True
+
+        # If the active selection source was the working tree lists...
+        if is_working_tree_diff:
+            # Ensure detail file list selection doesn't interfere / clear it?
+            # self.detail_files_list.clearSelection() # Optional: enforce single focus
+
+            if not selected_item or not self.repo_path:
+                 self.clear_diff_view(); return
+
+            file_path = extract_file_path(selected_item.text())
+            if not file_path:
+                 self.clear_diff_view(); return
+
+            if not self._can_run_git_command("show working tree diff"): return
+
+            diff_type = "Staged" if is_staged else "Unstaged"
+            self.diff_view.setText(f"Loading {diff_type} diff for {file_path}...")
+            self.diff_label.setText(f"{diff_type} Changes to {file_path}:")
+
+            command = ['git', 'diff']
+            if is_staged: command.append('--cached')
+            command.extend(['--', file_path])
+
+            self._start_git_thread(command, "Working Tree Diff", parser_slot=self._display_diff)
+
+        # If no selection in status lists, don't clear diff unless explicitly needed
+        # (e.g., if selection is lost in detail list, handled by its itemSelectionChanged)
+        # else:
+        #    # Consider if clearing is desired when *nothing* is selected anywhere
+        #    # self.clear_diff_view()
+        #    pass
 
     def stage_selected_files(self):
         """Runs 'git add' on selected files in the unstaged AND untracked lists."""
@@ -632,68 +863,80 @@ class SimpleGitApp(QMainWindow):
 
     def _on_git_command_finished(self, finished_thread, success, stdout, stderr):
         """Central handler for when any GitCommandThread finishes."""
-        # --- Safety Check: Ignore signals from unexpected threads ---
         if finished_thread != self.current_git_thread:
             print(f"Ignoring finished signal from unexpected thread: {finished_thread}")
             return
 
-        # --- Store info from the finished thread before clearing references ---
-        op_name = self.current_operation_name
-        # <<< Get the correct parser stored during _start_git_thread >>>
-        parser = self._output_parser_slot
-        # Check initial load status (this flag is used *before* reset below)
+        op_name = self.current_operation_name; parser = self._output_parser_slot
         initial_load_branches = self._is_initial_load_branches and op_name == "Branches"
         initial_load_status = self._is_initial_load_status and op_name == "Status"
         initial_load_history = self._is_initial_load_history and op_name == "History"
 
-        print(f"Git command finished: {op_name}, Success: {success}") # Debug
+        print(f"Git command finished: {op_name}, Success: {success}")
 
-        # --- Immediately clear thread references ---
-        self.current_git_thread = None
-        self.current_operation_name = None
-        self._output_parser_slot = None # Clear the stored parser
-        # Reset initial load flag only after the specific operation finishes
+        self.current_git_thread = None; self.current_operation_name = None; self._output_parser_slot = None
         if initial_load_branches: self._is_initial_load_branches = False
         if initial_load_status: self._is_initial_load_status = False
         if initial_load_history: self._is_initial_load_history = False
 
-
-        # --- Process results and Handle Errors ---
         error_occurred = not success
-        post_action_refresh_status = False
-        post_action_refresh_history = False
-        post_action_refresh_branches = False
+        post_action_refresh_status = False; post_action_refresh_history = False; post_action_refresh_branches = False
 
         if success:
             if parser:
-                try:
-                    # <<< Call the stored parser slot >>>
-                    parser(stdout)
-                except Exception as e:
-                    self.error_output_area.setText(f"Error processing output for {op_name}: {e}")
-                    print(f"Parser Error ({op_name}): {e}") # Debug print
-                    error_occurred = True
-            # ... (rest of success handling: success messages, post actions, clean message) ...
-            elif op_name in ["Fetch", "Pull", "Push"]: output_to_show = stdout.strip() if stdout.strip() else f"{op_name} successful."; # ... (rest of message logic) ...
-            elif f"{op_name}..." in self.error_output_area.toPlainText() or f"{op_name}ing..." in self.error_output_area.toPlainText(): self.error_output_area.clear()
-            if op_name in ["Commit", "Checkout", "Pull", "Push", "Fetch"]: post_action_refresh_status = True; post_action_refresh_history = True; post_action_refresh_branches = True; # ... (rest of post-action logic) ...
-            elif op_name == "Create Branch": post_action_refresh_branches = True
+                try: parser(stdout)
+                except Exception as e: self.error_output_area.setText(f"Error processing output for {op_name}: {e}"); print(f"Parser Error ({op_name}): {e}"); error_occurred = True
+            elif op_name in ["Fetch", "Pull", "Push", "Show Commit", "Commit Diff", "Working Tree Diff"]: # Added Show/Diff ops
+                 # Clear specific 'Running...' messages if no parser handled output
+                 if f"{op_name}..." in self.error_output_area.toPlainText() or f"{op_name}ing..." in self.error_output_area.toPlainText():
+                      self.error_output_area.clear()
+                 # Show simple success for remote ops if stdout was empty
+                 elif not stdout.strip() and op_name in ["Fetch", "Pull", "Push"]:
+                      self.error_output_area.setText(f"{op_name} successful (no output).")
+                 # Don't show generic success for Show/Diff ops, lack of error is enough
+
+            # --- Determine Follow-Up Actions on Success ---
+            if op_name in ["Commit", "Checkout", "Pull", "Push", "Fetch"]:
+                post_action_refresh_status = True; post_action_refresh_history = True; post_action_refresh_branches = True
+                if op_name == "Commit": self.commit_message_box.clear()
+                if op_name == "Checkout": self._show_commit_detail_view(False); self._selected_commit_hash_details = None # Revert to commit box after checkout
+            elif op_name == "Create Branch":
+                 post_action_refresh_branches = True
             elif op_name == "Branches" and initial_load_branches: post_action_refresh_status = True
-            elif op_name == "Status" and initial_load_status: post_action_refresh_history = True # <<< Calls correct history refresh
+            elif op_name == "Status" and initial_load_status: post_action_refresh_history = True
             elif op_name in ["Stage", "Unstage", "Discard", "Clean"]: post_action_refresh_status = True
-            elif op_name == "Diff": pass
-            if op_name == "Status": is_clean = (self.staged_list.count()==0 and self.unstaged_list.count()==0 and self.untracked_list.count()==0); # ... (rest of clean message logic) ...
+            elif op_name in ["Diff", "Show Commit", "Commit Diff", "Working Tree Diff"]: pass # No automatic refreshes needed
+
+            if op_name == "Status": # Update clean message
+                 is_clean = (self.staged_list.count()==0 and self.unstaged_list.count()==0 and self.untracked_list.count()==0)
+                 if is_clean: self.error_output_area.setText("Working tree clean.")
 
         else: # Handle Failure
-            # ... (Keep specific and generic error handling) ...
-            error_message = ""; # ... (rest of error message formatting) ...
+            error_message = ""
+            # --- Specific Error Handling ---
+            if op_name == "Checkout" and "overwritten by checkout" in stderr: error_message = f"Checkout failed: Commit or stash changes first.\nDetails:\n{stderr.strip()}"
+            elif op_name == "Pull" and "Merge conflict" in stderr: error_message = f"Pull failed: Merge conflicts detected. Resolve manually and commit.\nDetails:\n{stderr.strip()}"; post_action_refresh_status = True # Refresh status to show conflicts
+            elif op_name == "Pull" and "overwritten by merge" in stderr: error_message = f"Pull failed: Local changes would be overwritten. Commit or stash first.\nDetails:\n{stderr.strip()}"
+            elif op_name == "Push" and "rejected" in stderr: error_message = f"Push rejected. Remote has new commits (pull first)?\nDetails:\n{stderr.strip()}"
+            elif op_name in ["Fetch", "Pull", "Push"] and ("Authentication failed" in stderr or "could not read Username" in stderr or "Permission denied" in stderr or "Repository not found" in stderr): error_message = f"{op_name} failed: Authentication/permission issue. Check credentials/keys/URL.\nDetails:\n{stderr.strip()}"
+            elif op_name == "Commit Diff" and "unknown revision or path not in the working tree" in stderr: # Handle diffing root commit parent
+                 error_message = f"Cannot diff initial commit (no parent)."
+                 self.clear_diff_view() # Clear the diff view specifically
+            # --- Generic Error ---
+            else:
+                 error_message = f"Error during {op_name}:\n{stderr.strip()}"
+                 if not stderr.strip() and stdout.strip(): error_message += f"\nOutput:\n{stdout.strip()}"
+
             self.error_output_area.setText(error_message)
-            if op_name == "Diff": self.clear_diff_view()
-            if op_name == "History": self.clear_history_view() # Clear graph on error too
+            # Clear relevant views on error
+            if op_name == "Diff" or op_name == "Commit Diff" or op_name == "Working Tree Diff": self.clear_diff_view()
+            if op_name == "History": self.clear_history_view()
+            if op_name == "Show Commit": # Clear detail view and revert stack on error
+                self._show_commit_detail_view(False)
+                self._selected_commit_hash_details = None
 
 
         # --- Trigger Post Actions using QTimer ---
-        # ... (Keep QTimer logic) ...
         delay = 10
         if post_action_refresh_branches: QTimer.singleShot(delay, self.refresh_branches); delay += 20
         if post_action_refresh_status: QTimer.singleShot(delay, self.refresh_status); delay += 20
@@ -701,9 +944,13 @@ class SimpleGitApp(QMainWindow):
 
 
         # --- Update UI Busy State ---
-        # ... (Keep UI busy state logic) ...
-        if not post_action_refresh_status and not post_action_refresh_history and not post_action_refresh_branches: QTimer.singleShot(0, lambda: self.set_ui_busy(False))
-        else: QTimer.singleShot(0, self.update_button_states)
+        # Unlock UI only if no further actions are queued
+        if not post_action_refresh_status and not post_action_refresh_history and not post_action_refresh_branches:
+             # Use QTimer to ensure unlock happens after potential signal processing
+             QTimer.singleShot(0, lambda: self.set_ui_busy(False))
+        else:
+             # If actions are queued, just update button states for now
+             QTimer.singleShot(0, self.update_button_states)
 
     # --- Parsing / Display Slots ---
 
@@ -747,7 +994,7 @@ class SimpleGitApp(QMainWindow):
         for line in lines:  # ... (rest of parsing logic) ...
             if not line:
                 continue
-                parts = line.split("\t", 3)
+            parts = line.split("\t", 3)
             if len(parts) == 4:
                 rows.append(parts)
         self.history_table.setRowCount(len(rows))
@@ -787,9 +1034,9 @@ class SimpleGitApp(QMainWindow):
         for line in lines:  # ... (rest of parsing logic) ...
             if not line:
                 continue
-                is_head = line.startswith("*")
-                ref_name = line.lstrip("*")
-                item_text = ref_name
+            is_head = line.startswith("*")
+            ref_name = line.lstrip("*")
+            item_text = ref_name
             if ref_name.startswith("refs/heads/"):
                 branch_name = ref_name[len("refs/heads/") :]
                 item_text = branch_name
@@ -823,34 +1070,32 @@ class SimpleGitApp(QMainWindow):
         self.branches_view.expandAll()
         self.current_branch = current_local_branch
 
-    def _display_diff(self, diff_output):
-        # (Unchanged)
+    def _display_diff(self, diff_output: str):
+        """Displays the diff output in the diff_view, with simple syntax highlighting."""
+        # Ensure diff view exists (might not if UI init fails)
+        if not hasattr(self, 'diff_view') or not self.diff_view:
+             print("Error: Diff view widget not available.")
+             return
+
         self.diff_view.clear()
         cursor = self.diff_view.textCursor()
-        for line in diff_output.splitlines():  # ... (rest of diff coloring logic) ...
+        for line in diff_output.splitlines():
             cursor.movePosition(cursor.MoveOperation.End)
-            line_text = line + "\n"
-            fmt = self.diff_view.currentCharFormat()
-            if line.startswith("+"):
-                fmt.setForeground(DIFF_ADDED_COLOR)
-            elif line.startswith("-"):
-                fmt.setForeground(DIFF_REMOVED_COLOR)
-            elif (
-                line.startswith("diff --git")
-                or line.startswith("index ")
-                or line.startswith("---")
-                or line.startswith("+++")
-            ):
-                fmt.setForeground(DIFF_HEADER_COLOR)
-                fmt.setFontWeight(QFont.Weight.Bold)
-            elif line.startswith("@@"):
-                fmt.setForeground(DIFF_HEADER_COLOR)
-                fmt.setFontWeight(QFont.Weight.Normal)
-            else:
-                fmt.setForeground(DIFF_DEFAULT_COLOR)
-                fmt.setFontWeight(QFont.Weight.Normal)
-            cursor.insertText(line_text, fmt)
-        self.diff_view.moveCursor(cursor.MoveOperation.Start)
+            line_text = line + '\n' # Add newline back
+            # Get current format to modify, otherwise might inherit previous line's format
+            fmt = QTextCharFormat() # Start fresh or use self.diff_view.currentCharFormat()? Fresh is safer.
+
+            if line.startswith('+'): fmt.setForeground(DIFF_ADDED_COLOR)
+            elif line.startswith('-'): fmt.setForeground(DIFF_REMOVED_COLOR)
+            elif line.startswith('diff --git') or line.startswith('index ') or line.startswith('---') or line.startswith('+++'):
+                 fmt.setForeground(DIFF_HEADER_COLOR); fmt.setFontWeight(QFont.Weight.Bold)
+            elif line.startswith('@@'):
+                 fmt.setForeground(DIFF_HEADER_COLOR); fmt.setFontWeight(QFont.Weight.Normal)
+            else: # Default line
+                 fmt.setForeground(DIFF_DEFAULT_COLOR); fmt.setFontWeight(QFont.Weight.Normal)
+
+            cursor.insertText(line_text, fmt) # Apply format with text
+        self.diff_view.moveCursor(cursor.MoveOperation.Start) # Scroll to top
 
     # --- UI State & Helpers ---
 
@@ -877,11 +1122,20 @@ class SimpleGitApp(QMainWindow):
         self.diff_label.setText("Diff:")
 
     def clear_all_views(self):
+        """Clears status lists, history graph, branches tree, diff view, detail view and commit message box."""
         self.clear_status_lists()
-        self.clear_history_view()
+        self.clear_history_view() # Clears graph data
         self.clear_branches_view()
         self.clear_diff_view()
         self.clear_commit_box()
+        # Also clear commit detail view fields
+        self.detail_hash_value.clear()
+        self.detail_author_value.clear()
+        self.detail_date_value.clear()
+        self.detail_message_view.clear()
+        self.detail_files_list.clear()
+        self._selected_commit_hash_details = None # Reset selected hash
+        self._show_commit_detail_view(False) # Ensure commit box is shown
 
     def update_button_states(self):
         """Enable/disable buttons based on repo status, busy state, selections, etc."""
