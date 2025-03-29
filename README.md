@@ -8,7 +8,7 @@ files, committing, pushing, pushing, pulling, fetching etc.
 Provides visuals, like a commit graph. Branches can be created within the app,
 and checked out easily.
 
-[The interface](assets/image.png)
+![The interface](assets/image.png)
 
 ## How to use
 
