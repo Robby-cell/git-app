@@ -57,7 +57,7 @@ class SimpleGitApp(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle(
-            "Simple Python Git GUI - Step 1: Commit Details"
+            "Git App"
         )  # Updated title
         self.setGeometry(50, 50, 1250, 800)
         self.repo_path = None
