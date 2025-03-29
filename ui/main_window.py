@@ -1033,6 +1033,7 @@ class SimpleGitApp(QMainWindow):
     # --- Application Exit Handling ---
     def closeEvent(self, event):
         # (Unchanged)
+        wait_cursor = None
         if self.current_git_thread and self.current_git_thread.isRunning():
             print(f"Waiting for '{self.current_operation_name}' to finish...")
             self.setEnabled(False)
